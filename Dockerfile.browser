@@ -1,0 +1,37 @@
+FROM ghcr.io/windmill-labs/windmill:1.651.1
+
+# Install system dependencies for Chrome/SeleniumBase/PyVirtualDisplay
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    chromium \
+    xvfb \
+    python3-tk \
+    python3-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Python 3.13 using uv (if not already present)
+RUN uv python install 3.13
+
+# Install Python packages using uv for Python 3.13 environment
+# Use --system to install into the managed python environment directly
+RUN uv pip install --python 3.13 --system --break-system-packages \
+    seleniumbase \
+    pyautogui \
+    pyvirtualdisplay \
+    selenium \
+    boto3 \
+    botocore \
+    jmespath \
+    python-dateutil \
+    six \
+    urllib3 \
+    wmill
+
+# Install chromedriver using seleniumbase in the 3.13 environment
+RUN uv run --python 3.13 -m seleniumbase install chromedriver
+
+# Set environment variables so Windmill knows dependencies are pre-installed
+ENV PIP_LOCAL_DEPENDENCIES=seleniumbase,pyautogui,pyvirtualdisplay,selenium,boto3,botocore,jmespath,python-dateutil,six,urllib3,wmill
+ENV HOME=/tmp/windmill
+ENV SE_CACHE_PATH=/tmp/windmill/cache
+
+RUN chmod -R 777 /tmp/windmill/cache
