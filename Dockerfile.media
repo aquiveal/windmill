@@ -1,0 +1,97 @@
+FROM ghcr.io/windmill-labs/windmill:1.653.0 AS builder
+
+# Install build dependencies for ImageMagick 6.9.13-43
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    curl \
+    pkg-config \
+    libpng-dev \
+    libjpeg-dev \
+    libtiff-dev \
+    libwebp-dev \
+    libfreetype6-dev \
+    libltdl-dev \
+    zlib1g-dev \
+    libzstd-dev \
+    ca-certificates
+
+# Build ImageMagick 6.9.13-43 from source
+RUN curl -L https://github.com/ImageMagick/ImageMagick6/archive/refs/tags/6.9.13-43.tar.gz | tar -xz && \
+    cd ImageMagick6-6.9.13-43 && \
+    ./configure --with-modules --without-magick-plus-plus --disable-docs --without-x && \
+    make -j$(nproc) && \
+    make install
+
+FROM ghcr.io/windmill-labs/windmill:1.653.0
+
+# Install git, openssh-client (required for git+ssh), and runtime libraries for ImageMagick 6.9.13
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git \
+    openssh-client \
+    libgl1 \
+    libglib2.0-0 \
+    libpng16-16 \
+    libjpeg62-turbo \
+    libtiff6 \
+    libwebp7 \
+    libfreetype6 \
+    libltdl7 \
+    zlib1g \
+    libzstd1 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy compiled ImageMagick 6.9.13-43 from builder
+COPY --from=builder /usr/local/bin/ /usr/local/bin/
+COPY --from=builder /usr/local/lib/ /usr/local/lib/
+COPY --from=builder /usr/local/etc/ImageMagick-6/ /usr/local/etc/ImageMagick-6/
+COPY --from=builder /usr/local/share/ImageMagick-6/ /usr/local/share/ImageMagick-6/
+
+# Update library cache and ensure compatibility with snapp
+RUN ldconfig && ln -s /usr/local/bin/convert /usr/local/bin/convert-im6.q16
+
+# Configure policy to use available RAM (avoiding disk thrashing) and limit threads
+RUN echo '<policymap> \
+  <policy domain="resource" name="memory" value="2GiB"/> \
+  <policy domain="resource" name="map" value="2GiB"/> \
+  <policy domain="resource" name="width" value="128KP"/> \
+  <policy domain="resource" name="height" value="128KP"/> \
+  <policy domain="resource" name="area" value="8GP"/> \
+  <policy domain="resource" name="disk" value="8GiB"/> \
+  <policy domain="resource" name="file" value="768"/> \
+  <policy domain="resource" name="thread" value="1"/> \
+  <policy domain="delegate" rights="none" pattern="URL" /> \
+  <policy domain="delegate" rights="none" pattern="HTTPS" /> \
+  <policy domain="delegate" rights="none" pattern="HTTP" /> \
+  <policy domain="coder" rights="read|write" pattern="PDF" /> \
+  <policy domain="coder" rights="read|write" pattern="LABEL" /> \
+</policymap>' > /usr/local/etc/ImageMagick-6/policy.xml
+
+# Install Python 3.13 using uv (if not already present)
+RUN uv python install 3.13
+
+# Add github.com to known hosts to avoid interactive prompt during cloning
+RUN mkdir -p -m 0700 ~/.ssh && ssh-keyscan github.com >> ~/.ssh/known_hosts
+
+# Add cache buster argument to invalidate cache when snapp repository is updated
+ARG CACHE_BUSTER=1
+
+# Install snapp package using uv
+# --mount=type=ssh is used so that the host's SSH keys can be forwarded during the build
+# --mount=type=secret,id=GITHUB_TOKEN is used as a fallback to authenticate via gh cli token
+RUN --mount=type=ssh \
+    --mount=type=secret,id=GITHUB_TOKEN \
+    if [ -f /run/secrets/GITHUB_TOKEN ]; then \
+        export GITHUB_TOKEN=$(cat /run/secrets/GITHUB_TOKEN) && \
+        uv pip install --python 3.13 --system --break-system-packages "snapp @ git+https://x-access-token:${GITHUB_TOKEN}@github.com/capybaarainc/snapp.git#subdirectory=packages/snapp"; \
+    else \
+        uv pip install --python 3.13 --system --break-system-packages "snapp @ git+ssh://git@github.com/capybaarainc/snapp.git#subdirectory=packages/snapp"; \
+    fi
+
+# Set environment variables so Windmill knows dependencies are pre-installed
+ENV PIP_LOCAL_DEPENDENCIES=snapp
+
+ENV HOME=/tmp/windmill
+ENV SE_CACHE_PATH=/tmp/windmill/cache
+ENV MAGICK_TEMPORARY_PATH=/tmp/imagemagick
+RUN chmod -R 777 /tmp/windmill/cache
+RUN mkdir -p /tmp/imagemagick && chmod -R 777 /tmp/imagemagick
